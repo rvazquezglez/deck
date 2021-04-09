@@ -26,4 +26,5 @@ export interface ICloudFoundryLoadBalancerUpsertCommand extends ILoadBalancerUps
   port?: string;
   serverGroups?: ICloudFoundryServerGroup[];
   domain: string;
+  routes: string[];
 }
