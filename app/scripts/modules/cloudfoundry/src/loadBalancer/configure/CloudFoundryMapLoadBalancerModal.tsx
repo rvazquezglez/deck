@@ -1,35 +1,66 @@
 import { IDeferred } from 'angular';
 import { IModalServiceInstance } from 'angular-ui-bootstrap';
-import { Formik } from 'formik';
+import { Form, Formik } from 'formik';
 import { $q } from 'ngimport';
 import React from 'react';
+import { Modal, ModalFooter } from 'react-bootstrap';
 import { Observable, Subject } from 'rxjs';
 
-import { AccountService, Application, IAccount, ILoadBalancerModalProps, NgReact, noop, ReactModal, SpinFormik, StageConfigField, StageConstants, WizardModal, WizardPage } from '@spinnaker/core';
-import { ICloudFoundryLoadBalancerUpsertCommand } from 'cloudfoundry/domain/ICloudFoundryLoadBalancer';
+import {
+  AccountService,
+  Application,
+  IAccount,
+  ILoadBalancerModalProps,
+  IModalComponentProps,
+  IServerGroup,
+  ModalClose,
+  NgReact,
+  noop,
+  ReactInjector,
+  ReactModal,
+  SpinFormik,
+  StageConfigField,
+  StageConstants,
+  TaskMonitor,
+} from '@spinnaker/core';
+import { ICloudFoundryServerGroup } from 'cloudfoundry/domain';
 import { AccountRegionClusterSelector, Routes } from 'cloudfoundry/presentation';
-
-interface ICloudFoundryLoadBalancersValues {
-  routes: string[];
-}
 
 export interface ICreateCloudFoundryMapLoadBalancerState {
   accounts: IAccount[];
   regions: string[];
   application: Application;
-  initialValues: ICloudFoundryLoadBalancersValues;
+  initialValues: ICloudFoundryLoadBalancerModalValues;
+  serverGroup: ICloudFoundryServerGroup;
+  taskMonitor: TaskMonitor;
+}
+
+export interface ICloudFoundryLoadBalancerModalProps extends IModalComponentProps {
+  application: Application;
+}
+
+export interface ICloudFoundryLoadBalancerModalValues {
+  credentials: string;
+  region: string;
+  cluster: string;
+  routes: string[];
 }
 
 export class CloudFoundryMapLoadBalancerModal extends React.Component<
-  ILoadBalancerModalProps,
+  ICloudFoundryLoadBalancerModalProps,
   ICreateCloudFoundryMapLoadBalancerState
 > {
+  public static defaultProps: Partial<ICloudFoundryLoadBalancerModalProps> = {
+    closeModal: noop,
+    dismissModal: noop,
+  };
+
   private destroy$ = new Subject();
-  private formikRef = React.createRef<Formik<ICloudFoundryLoadBalancersValues>>();
+  private formikRef = React.createRef<Formik<ICloudFoundryLoadBalancerModalValues>>();
   private refreshUnsubscribe: () => void;
   private $uibModalInstanceEmulation: IModalServiceInstance & { deferred?: IDeferred<any> };
 
-  constructor(props: ILoadBalancerModalProps) {
+  constructor(props: ICloudFoundryLoadBalancerModalProps) {
     super(props);
 
     const deferred = $q.defer();
@@ -43,10 +74,20 @@ export class CloudFoundryMapLoadBalancerModal extends React.Component<
     this.state = {
       accounts: [],
       regions: [],
-      application: props.app,
+      application: props.application,
       initialValues: {
+        credentials: '',
+        region: '',
+        cluster: '',
         routes: [''],
       },
+      taskMonitor: new TaskMonitor({
+        application: props.application,
+        title: 'Mapping a route to your server group',
+        modalInstance: TaskMonitor.modalInstanceEmulation(() => this.props.dismissModal()),
+        onTaskComplete: () => this.props.application.serverGroups.refresh(),
+      }),
+      serverGroup: null,
     };
     Observable.fromPromise(AccountService.listAccounts('cloudfoundry'))
       .takeUntil(this.destroy$)
@@ -58,8 +99,8 @@ export class CloudFoundryMapLoadBalancerModal extends React.Component<
     return ReactModal.show(
       CloudFoundryMapLoadBalancerModal,
       {
-        ...props,
-        className: 'create-pipeline-modal-overflow-visible',
+        application: props.app,
+        // className: 'create-pipeline-modal-overflow-visible',
       },
       modalProps,
     );
@@ -83,72 +124,101 @@ export class CloudFoundryMapLoadBalancerModal extends React.Component<
     this.props.dismissModal();
   }
 
-  private submit = (): void => {
-    this.props.dismissModal();
+  private submit = (values: ICloudFoundryLoadBalancerModalValues): void => {
+    const { routes } = values;
+    const { serverGroup } = this.state;
+    const coreServerGroup: IServerGroup = {
+      account: serverGroup.account,
+      cloudProvider: serverGroup.cloudProvider,
+      cluster: serverGroup.cluster,
+      instanceCounts: serverGroup.instanceCounts,
+      instances: serverGroup.instances,
+      loadBalancers: routes,
+      name: serverGroup.name,
+      region: serverGroup.region,
+      type: serverGroup.type,
+    };
+
+    this.state.taskMonitor.submit(() => {
+      return ReactInjector.serverGroupWriter.mapLoadBalancers(coreServerGroup, this.props.application, {
+        serverGroupName: serverGroup.name,
+      });
+    });
+  };
+
+  private close = (args?: any): void => {
+    this.props.dismissModal.apply(null, args);
+  };
+
+  private accountRegionClusterUpdated = (values) => {
+    this.setState({
+      initialValues: {
+        cluster: values.cluster,
+        credentials: values.credentials,
+        region: values.region,
+        routes: [''],
+      },
+    });
   };
 
   public render() {
-    const initialValues = {} as ICloudFoundryLoadBalancerUpsertCommand;
+    const { accounts, application, initialValues } = this.state;
+    const { TaskMonitorWrapper, TargetSelect } = NgReact;
     const target = '';
-    const { accounts, application } = this.state;
-    const { TargetSelect } = NgReact;
-
     return (
-      <WizardModal<ICloudFoundryLoadBalancerUpsertCommand>
-        heading="Create a load balancer"
-        initialValues={initialValues}
-        taskMonitor={noop}
-        dismissModal={this.props.dismissModal}
-        closeModal={this.submit}
-        submitButtonLabel={'Ok'}
-        render={({ formik, nextIdx, wizard }) => (
-          <WizardPage
-            label="Map load balancer"
-            wizard={wizard}
-            order={nextIdx()}
-            render={({ innerRef }) => (
-              <div className="form-horizontal">
-                <AccountRegionClusterSelector
-                  accounts={accounts}
-                  application={application}
-                  cloudProvider={'cloudfoundry'}
-                  isSingleRegion={true}
-                  onComponentUpdate={(values) => {
-                    // update region cluster
-                  }}
-                  component={this}
-                />
-                <StageConfigField label="Target">
-                  <TargetSelect
-                    model={{ target }}
-                    options={StageConstants.TARGET_LIST}
-                    onChange={() => {
-                      // update target
-                    }}
-                  />
-                </StageConfigField>
-                <SpinFormik<ICloudFoundryLoadBalancersValues>
-                  ref={this.formikRef}
-                  initialValues={initialValues}
-                  onSubmit={null}
-                  render={() => {
-                    return (
-                      <Routes
-                        fieldName={'routes'}
-                        isRequired={true}
-                        singleRouteOnly={true}
-                        // onChange={(routes: string[]) => {
-                        //   // update routes
-                        // }}
+      <>
+        <TaskMonitorWrapper monitor={this.state.taskMonitor} />
+        <SpinFormik<ICloudFoundryLoadBalancerModalValues>
+          ref={this.formikRef}
+          initialValues={initialValues}
+          onSubmit={this.submit}
+          render={(formik) => {
+            return (
+              <>
+                <ModalClose dismiss={this.close} />
+                <Modal.Header>
+                  <Modal.Title>Map route</Modal.Title>
+                </Modal.Header>
+                <Modal.Body>
+                  <Form className="form-horizontal">
+                    <AccountRegionClusterSelector
+                      accounts={accounts}
+                      application={application}
+                      cloudProvider={'cloudfoundry'}
+                      isSingleRegion={true}
+                      onComponentUpdate={this.accountRegionClusterUpdated}
+                      component={initialValues}
+                    />
+                    <StageConfigField label="Target">
+                      <TargetSelect
+                        model={{ target }}
+                        options={StageConstants.TARGET_LIST}
+                        onChange={() => {
+                          // update target
+                        }}
                       />
-                    );
-                  }}
-                />
-              </div>
-            )}
-          />
-        )}
-      />
+                    </StageConfigField>
+                    <Routes fieldName="routes" isRequired={true} singleRouteOnly={true} />
+                  </Form>
+                </Modal.Body>
+                <ModalFooter>
+                  <button className="btn btn-default" onClick={this.close}>
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="btn btn-primary"
+                    onClick={() => this.submit(formik.values)}
+                    disabled={!formik.isValid}
+                  >
+                    Submit
+                  </button>
+                </ModalFooter>
+              </>
+            );
+          }}
+        />
+      </>
     );
   }
 }
